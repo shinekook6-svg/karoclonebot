@@ -1,6 +1,22 @@
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import os, json, time, datetime, math, traceback
+# ------------ Keep Alive Server for Render ------------
+from flask import Flask
+import threading
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_flask).start()
+# ------------------------------------------------------
 from random import choices as rand_choices
 # ---------------------------
 # CONFIG - change these
@@ -955,4 +971,9 @@ def cmd_addpoints(msg):
 # ---------------------------
 if __name__ == "__main__":
     print("Bot starting...")
-    bot.infinity_polling()
+    while True:
+        try:
+            bot.polling(none_stop=True, timeout=60)
+        except Exception as e:
+            print("Polling error:", e)
+            time.sleep(3)
