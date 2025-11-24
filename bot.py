@@ -1,21 +1,21 @@
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import os, json, time, datetime, math, traceback
-# ------------ Keep Alive Server for Render ------------
+# ==== Render Keep Alive Server ====
 from flask import Flask
-import threading
-
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    return "Bot Running!"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+import threading
+def run():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
-threading.Thread(target=run_flask).start()
+t = threading.Thread(target=run)
+t.start()
+# ==================================
 # ------------------------------------------------------
 from random import choices as rand_choices
 # ---------------------------
