@@ -21,7 +21,7 @@ from random import choices as rand_choices
 # ---------------------------
 # CONFIG - change these
 # ---------------------------
-API_TOKEN = "7977170727:AAFI2IWRSXGDFkznf8vT7sy4GaOuZgLnkD8"   # <-- change if needed                                       # <-- change if needed
+API_TOKEN = "7977170727:AAGIy7IE6_b0B4RTkq9JZ-Jx_xYJedg61yk"   # <-- change if needed                                       # <-- change if needed
 ADMIN_ID = 6870403909
 # ---------------------------
 bot = telebot.TeleBot(API_TOKEN)
