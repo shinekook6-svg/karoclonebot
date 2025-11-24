@@ -1,0 +1,1065 @@
+# full_bot_with_top_ad.py
+import telebot
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+import os, json, time, datetime, math, traceback
+from random import choices as rand_choices
+
+# ---------------------------
+# CONFIG - change these
+# ---------------------------
+API_TOKEN = "7977170727:AAFI2IWRSXGDFkznf8vT7sy4GaOuZgLnkD8"   # <-- change if needed                                       # <-- change if needed
+ADMIN_ID = 6870403909
+# ---------------------------
+OWNER_ID = 6870403909
+ADMINS = [OWNER_ID]
+bot = telebot.TeleBot(API_TOKEN)
+ADMIN_IDS = [ADMIN_ID]
+DATA_DIR = "data"
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+SPIN_FILE = os.path.join(DATA_DIR, "spin.json")
+REWARD_FILE = os.path.join(DATA_DIR, "rewards.json")
+PENDING_FILE = os.path.join(DATA_DIR, "pending.json")
+ADS_FILE = os.path.join(DATA_DIR, "ads.json")
+AD_PLANS_FILE = os.path.join(DATA_DIR, "ad_plans.json")   # <-- new: days=price plans
+
+# ensure data dir
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# ---------------------------
+# helpers: load/save json
+# ---------------------------
+def load_json(path, default):
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            json.dump(default, f, indent=2)
+        return default
+    try:
+        return json.load(open(path, "r"))
+    except Exception:
+        # recover file
+        with open(path, "w") as f:
+            json.dump(default, f, indent=2)
+        return default
+
+def save_json(path, obj):
+    json.dump(obj, open(path, "w"), indent=2)
+
+# ---------------------------
+# load initial files
+# ---------------------------
+users = load_json(USERS_FILE, {})
+spin_items = load_json(SPIN_FILE, [])       # list of {"name":"🎉 Gold", "chance":20}
+rewards = load_json(REWARD_FILE, {})        # map name -> cost (int)
+pending = load_json(PENDING_FILE, {})       # map pending_id -> {...}
+ads = load_json(ADS_FILE, {})               # map ad_id -> {...} (active ads)
+ad_plans = load_json(AD_PLANS_FILE, {})     # new: map days -> price, e.g. {"3":"4000","7":"8000"}
+
+# ---------------------------
+# utility: simple cleanup for expired ads
+# ---------------------------
+def cleanup_expired_ads():
+    global ads
+    now = int(time.time())
+    changed = False
+    remove_keys = []
+    for k, v in list(ads.items()):
+        try:
+            if v.get("until") and int(v.get("until", 0)) <= now:
+                remove_keys.append(k)
+        except:
+            pass
+    for k in remove_keys:
+        del ads[k]
+        changed = True
+    if changed:
+        save_json(ADS_FILE, ads)
+
+# initial cleanup on startup
+cleanup_expired_ads()
+
+# ---------------------------
+# utility: user registration
+# ---------------------------
+def ensure_user(user_id, username=None, first_name=None):
+    uid = str(user_id)
+    changed = False
+    if uid not in users:
+        users[uid] = {
+            "points": 0,
+            "invites": 0,
+            "invited_by": None,
+            "vip": None,
+            "free_spins": 0,
+            "last_vip_claim": None,
+            "ads_until": None,
+            "registered_at": int(time.time()),
+            "username": username or "",
+            "first_name": first_name or ""
+        }
+        changed = True
+    else:
+        if username and users[uid].get("username") != username:
+            users[uid]["username"] = username
+            changed = True
+    if changed:
+        save_json(USERS_FILE, users)
+    return users[uid]
+
+def add_points(user_id, amount):
+    uid = str(user_id)
+    ensure_user(uid) if isinstance(user_id, str) else ensure_user(user_id)
+    users[str(user_id)]["points"] = users[str(user_id)].get("points", 0) + amount
+    save_json(USERS_FILE, users)
+
+# ---------------------------
+# keyboards
+# ---------------------------
+def main_reply_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    kb.row(KeyboardButton("🎡 Spin"), KeyboardButton("👥 Invite"))
+    kb.row(KeyboardButton("💱 Exchange"), KeyboardButton("💰 Check Balance"))
+    kb.row(KeyboardButton("⭐ VIP Plans"), KeyboardButton("📢 Ads"))
+    kb.row(KeyboardButton("🛠 Admin Panel"))
+    return kb
+
+def inline_yes_no(redeem_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ Redeem", callback_data=f"redeem_do:{redeem_id}"),
+           InlineKeyboardButton("✖ Cancel", callback_data=f"redeem_cancel:{redeem_id}"))
+    return kb
+
+def admin_approve_buttons(pending_id):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✔ Approve", callback_data=f"admin_approve:{pending_id}"),
+           InlineKeyboardButton("✖ Reject", callback_data=f"admin_reject:{pending_id}"))
+    return kb
+
+# add admin panel ad-plan buttons and addpoints button
+def admin_panel_keyboard():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("➕ Add Reward", callback_data="admin_add_reward"),
+           InlineKeyboardButton("📝 Edit Reward", callback_data="admin_edit_reward"))
+    kb.add(InlineKeyboardButton("📋 List Rewards", callback_data="admin_list_reward"))
+    kb.add(InlineKeyboardButton("🗑 Delete Reward", callback_data="admin_del_reward"))
+    kb.add(InlineKeyboardButton("➕ Add Spin Item", callback_data="admin_add_spin"),
+           InlineKeyboardButton("📝 Edit Spin Item", callback_data="admin_edit_spin"))
+    kb.add(InlineKeyboardButton("📋 List Spin Items", callback_data="admin_list_spin"))
+    kb.add(InlineKeyboardButton("🗑 Delete Spin Item", callback_data="admin_del_spin"))
+    # new ad-plan buttons
+    kb.add(InlineKeyboardButton("➕ Add Ad Plan", callback_data="admin_add_adplan"),
+           InlineKeyboardButton("📋 List Ad Plans", callback_data="admin_list_adplan"))
+    kb.add(InlineKeyboardButton("🗑 Delete Ad Plan", callback_data="admin_del_adplan"))
+    # addpoints helper
+    kb.add(InlineKeyboardButton("➕ Add Points", callback_data="admin_add_points"))
+    kb.add(InlineKeyboardButton("📊 Users Count", callback_data="admin_users_count"))
+    return kb
+
+# ---------------------------
+# helper spin/random
+# ---------------------------
+def load_spin_items():
+    global spin_items
+    spin_items = load_json(SPIN_FILE, [])
+    return spin_items
+
+def save_spin_items():
+    save_json(SPIN_FILE, spin_items)
+
+def weighted_pick(items):
+    if not items:
+        return None
+    names = [i["name"] for i in items]
+    weights = [i.get("chance", 1) for i in items]
+    picked_name = rand_choices(names, weights)[0]
+    for it in items:
+        if it["name"] == picked_name:
+            return it
+    return None
+
+# ---------------------------
+# parse spin result type
+# ---------------------------
+def parse_spin_result(item_name):
+    low = item_name.strip().lower()
+    if low == "sorry" or "try again" in low:
+        return {"type":"sorry", "text":item_name}
+    import re
+    m = re.search(r"(\d+)\s*points?", low)
+    if m:
+        amt = int(m.group(1))
+        return {"type":"points", "amount":amt, "text":item_name}
+    m2 = re.search(r"points[:=]\s*(\d+)", low)
+    if m2:
+        return {"type":"points", "amount":int(m2.group(1)), "text":item_name}
+    return {"type":"other", "text":item_name}
+
+# ---------------------------
+# helpers: rewards
+# ---------------------------
+def load_rewards_file():
+    global rewards
+    rewards = load_json(REWARD_FILE, {})
+    return rewards
+
+def save_rewards_file():
+    save_json(REWARD_FILE, rewards)
+
+# ---------------------------
+# helpers: pending
+# ---------------------------
+def load_pending():
+    global pending
+    pending = load_json(PENDING_FILE, {})
+    return pending
+
+def save_pending():
+    save_json(PENDING_FILE, pending)
+
+# ---------------------------
+# helpers: ads & ad plans
+# ---------------------------
+def load_ads():
+    global ads
+    ads = load_json(ADS_FILE, {})
+    cleanup_expired_ads()
+    return ads
+
+def save_ads():
+    save_json(ADS_FILE, ads)
+
+def load_ad_plans():
+    global ad_plans
+    ad_plans = load_json(AD_PLANS_FILE, {})
+    return ad_plans
+
+def save_ad_plans():
+    save_json(AD_PLANS_FILE, ad_plans)
+
+# get active top ad (returns one ad dict or None)
+def get_active_top_ad():
+    load_ads()
+    now = int(time.time())
+    best = None
+    for k, v in ads.items():
+        if v.get("until") and int(v["until"]) > now:
+            # treat all approved ads as top; choose the one with latest 'created' or any priority
+            if not best:
+                best = v
+            else:
+                # choose the one that expires later
+                if int(v.get("until",0)) > int(best.get("until",0)):
+                    best = v
+    return best
+
+def send_top_ad(chat_id):
+    ad = get_active_top_ad()
+    if not ad:
+        return
+    # build message: Photo (if any) + caption
+    caption = f"📣 Top Ad\n\n{ad.get('text','')}\n"
+    if ad.get("link"):
+        caption += f"\n{ad.get('link')}"
+    # if photo saved as file_id use send_photo, else plain text
+    try:
+        if ad.get("photo"):
+            bot.send_photo(chat_id, ad["photo"], caption=caption)
+        else:
+            bot.send_message(chat_id, caption)
+    except Exception:
+        # ignore send errors (bot might be blocked)
+        pass
+
+# ---------------------------
+# /start handler (referral support)
+# ---------------------------
+@bot.message_handler(commands=["start"])
+def handle_start(msg):
+    try:
+        user_id = msg.from_user.id
+        username = msg.from_user.username or ""
+        first_name = msg.from_user.first_name or ""
+        text = msg.text or ""
+        ensure_user(user_id, username, first_name)
+        # referral parsing
+        if text and text.startswith("/start ref_"):
+            ref = text.split("ref_")[1].strip()
+            if str(ref) != str(user_id):
+                if users[str(user_id)].get("invited_by") is None:
+                    users[str(user_id)]["invited_by"] = str(ref)
+                    users[str(ref)]["invites"] = users.get(str(ref), {}).get("invites", 0) + 1
+                    users[str(ref)]["points"] = users.get(str(ref), {}).get("points", 0) + 10
+                    save_json(USERS_FILE, users)
+                    try:
+                        bot.send_message(ref, f"🎉 Someone joined with your link! +10 points added.")
+                    except Exception:
+                        pass
+                    try:
+                        bot.send_message(ADMIN_ID, f"🔔 Referral: @{users[str(ref)].get('username','')} invited @{username or first_name}")
+                    except Exception:
+                        pass
+        # send top ad first (gives impression of top fixed banner)
+        send_top_ad(msg.chat.id)
+        # send welcome + menu
+        bot.send_message(msg.chat.id, "Welcome to KaroFutureBot!", reply_markup=main_reply_keyboard())
+    except Exception:
+        traceback.print_exc()
+
+# ---------------------------
+# simple text / menu handling
+# ---------------------------
+@bot.message_handler(func=lambda m: True, content_types=['text','photo'])
+def handle_text(msg):
+    try:
+        # If photo message and caption starts with /submitad, pass to cmd_submitad
+        if msg.content_type == 'photo':
+            # Allow user to submit ad by sending a photo with caption formatted as PRICE|DAYS|TEXT|LINK(optional)
+            caption = msg.caption or ""
+            if caption.strip().startswith("/submitad"):
+                return cmd_submitad(msg)
+            # fallback: ignore photo messages for now
+        text = (msg.text or "").strip()
+        user_id = msg.from_user.id
+        ensure_user(user_id, msg.from_user.username or "", msg.from_user.first_name or "")
+
+        # Main menu buttons (reply keyboard)
+        if text == "🎡 Spin": return handle_spin_text(msg)
+        if text == "👥 Invite": return handle_invite_text(msg)
+        if text == "💱 Exchange": return handle_exchange_text(msg)
+        if text == "💰 Check Balance": return handle_balance_text(msg)
+        if text == "⭐ VIP Plans": return handle_vip_text(msg)
+        if text == "📢 Ads": return handle_ads_text(msg)
+        if text == "🛠 Admin Panel": return handle_admin_panel_text(msg)
+
+        # admin commands and other text commands
+        if text.startswith("/addspin"): return cmd_addspin(msg)
+        if text.startswith("/editspin"): return cmd_editspin(msg)
+        if text.startswith("/listspin"): return cmd_listspin(msg)
+        if text.startswith("/delspin"): return cmd_delspin(msg)
+        if text.startswith("/addreward"): return cmd_addreward(msg)
+        if text.startswith("/editreward"): return cmd_editreward(msg)
+        if text.startswith("/listreward"): return cmd_listreward(msg)
+        if text.startswith("/delreward"): return cmd_delreward(msg)
+        if text.startswith("/submitad"): return cmd_submitad(msg)
+        if text.startswith("/addpoints"): return cmd_addpoints(msg)
+        # ad-plan admin commands
+        if text.startswith("/addadplan"):      # format: /addadplan DAYS=PRICE
+            return cmd_addadplan(msg)
+        if text.startswith("/listadplans"):
+            return cmd_listadplans(msg)
+        if text.startswith("/deladplan"):     # /deladplan DAYS
+            return cmd_deladplan(msg)
+
+        # fallback
+        bot.send_message(msg.chat.id, "I didn't understand. Use the menu below.", reply_markup=main_reply_keyboard())
+    except Exception:
+        traceback.print_exc()
+
+# ---------------------------
+# MENU: Invite
+# ---------------------------
+def handle_invite_text(msg):
+    user_id = msg.from_user.id
+    username = bot.get_me().username or "KaroCloneBot"
+    link = f"https://t.me/{username}?start=ref_{user_id}"
+    send_top_ad(msg.chat.id)
+    bot.send_message(msg.chat.id, f"🔗 Your invite link:\n{link}")
+
+# ---------------------------
+# MENU: Check Balance
+# ---------------------------
+def handle_balance_text(msg):
+    uid = str(msg.from_user.id)
+    u = users.get(uid)
+    if not u:
+        u = ensure_user(msg.from_user.id, msg.from_user.username or "", msg.from_user.first_name or "")
+    points = u.get("points", 0)
+    invites = u.get("invites", 0)
+    vip = u.get("vip")
+    vip_days = 0
+    if vip and vip.get("until"):
+        until = int(vip["until"])
+        now = int(time.time())
+        if until > now:
+            vip_days = math.ceil((until - now) / 86400)
+    ads_days = 0
+    if u.get("ads_until"):
+        until2 = int(u["ads_until"])
+        if until2 > int(time.time()):
+            ads_days = math.ceil((until2 - int(time.time())) / 86400)
+    send_top_ad(msg.chat.id)
+    txt = f"💎 Your Account\n\nPoints: {points}\nTotal Invites: {invites}\nVIP remaining days: {vip_days}\nAds remaining days: {ads_days}"
+    bot.send_message(msg.chat.id, txt)
+
+# ---------------------------
+# MENU: Exchange (shows rewards)
+# ---------------------------
+def handle_exchange_text(msg):
+    load_rewards_file()
+    send_top_ad(msg.chat.id)
+    if not rewards:
+        return bot.send_message(msg.chat.id, "❌ No rewards added yet. Admin can add via /addreward")
+    kb = InlineKeyboardMarkup()
+    for name, cost in rewards.items():
+        kb.add(InlineKeyboardButton(f"{name} - {cost} pts", callback_data=f"redeem:{name}"))
+    bot.send_message(msg.chat.id, "🎁 Choose a reward:", reply_markup=kb)
+
+# ---------------------------
+# MENU: VIP Plans (show plans)
+# ---------------------------
+def handle_vip_text(msg):
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("Normal VIP 7 days — 3000 MMK", callback_data="buyvip:normal"))
+    kb.add(InlineKeyboardButton("Special VIP 7 days — 5000 MMK", callback_data="buyvip:special"))
+    send_top_ad(msg.chat.id)
+    bot.send_message(msg.chat.id, "⭐ VIP Plans — choose one:", reply_markup=kb)
+
+# ---------------------------
+# MENU: Ads (USER flow - show plans)
+# ---------------------------
+def handle_ads_text(msg):
+    load_ad_plans()
+    send_top_ad(msg.chat.id)
+    kb = InlineKeyboardMarkup()
+    # show available ad plans from admin-defined ad_plans
+    if ad_plans:
+        for days_str, price in ad_plans.items():
+            label = f"{days_str} days — {price} MMK"
+            kb.add(InlineKeyboardButton(label, callback_data=f"buyad:{days_str}"))
+    else:
+        kb.add(InlineKeyboardButton("No ad plans (admin hasn't set plans yet)", callback_data="ads_no_plans"))
+    kb.add(InlineKeyboardButton("❌ Cancel", callback_data="ads_cancel"))
+    bot.send_message(msg.chat.id, "📢 Ads — choose a plan to post Top Fixed Ad:", reply_markup=kb)
+
+# ---------------------------
+# MENU: Admin Panel
+# ---------------------------
+def handle_admin_panel_text(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.send_message(msg.chat.id, "❌ Admin only")
+    send_top_ad(msg.chat.id)
+    bot.send_message(msg.chat.id, "⚙ Admin Panel", reply_markup=admin_panel_keyboard())
+
+# ---------------------------
+# SPIN and related (unchanged logic)
+# ---------------------------
+def handle_spin_text(msg):
+    uid = str(msg.from_user.id)
+    u = users.get(uid) or ensure_user(msg.from_user.id, msg.from_user.username or "", msg.from_user.first_name or "")
+    _grant_vip_daily(uid)
+    if u.get("free_spins", 0) > 0:
+        u["free_spins"] -= 1
+        save_json(USERS_FILE, users)
+        item = weighted_pick(load_spin_items())
+        if not item:
+            return bot.send_message(msg.chat.id, "❌ No spin items yet.")
+        _process_spin_result(msg.chat.id, msg.from_user, item)
+        return
+    pts = u.get("points", 0)
+    if pts < 100:
+        return bot.send_message(msg.chat.id, "❌ You need 100 points to spin.")
+    users[uid]["points"] = pts - 100
+    save_json(USERS_FILE, users)
+    item = weighted_pick(load_spin_items())
+    if not item:
+        return bot.send_message(msg.chat.id, "❌ No spin items yet.")
+    _process_spin_result(msg.chat.id, msg.from_user, item)
+
+def _process_spin_result(chat_id, from_user, item):
+    parsed = parse_spin_result(item["name"])
+    if parsed["type"] == "sorry":
+        bot.send_message(chat_id, "😢 Result: Sorry / Try Again")
+        return
+    if parsed["type"] == "points":
+        amt = parsed["amount"]
+        ensure_user(from_user.id, from_user.username or "", from_user.first_name or "")
+        users[str(from_user.id)]["points"] = users[str(from_user.id)].get("points", 0) + amt
+        save_json(USERS_FILE, users)
+        bot.send_message(chat_id, f"🎉 You won {amt} points!")
+        return
+    bot.send_message(chat_id, f"🎉 You won: {item['name']}")
+    uname = from_user.username or from_user.first_name or str(from_user.id)
+    for adm in ADMIN_IDS:
+        try:
+            bot.send_message(adm, f"🔔 User @{uname} won **{item['name']}**")
+        except Exception:
+            pass
+
+# ---------------------------
+# callback query handler for inline actions (extend to include ad-plan flow & admin ad-plan actions)
+# ---------------------------
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    try:
+        data = call.data or ""
+        # BUY AD PLAN from user
+        if data.startswith("buyad:"):
+            days_str = data.split("buyad:")[1]
+            load_ad_plans()
+            price = ad_plans.get(days_str)
+            if not price:
+                return bot.answer_callback_query(call.id, "Plan not found.")
+            # instruct user to submit ad using /submitad with the shown price/days
+            bot.answer_callback_query(call.id, f"Selected {days_str} days — {price} MMK. Please send your ad using /submitad {price}|{days_str}|TEXT|LINK(optional) or send a photo with caption: /submitad {price}|{days_str}|TEXT|LINK")
+            bot.send_message(call.message.chat.id, f"📎 Send your ad now.\nFormat (example):\n/submitad {price}|{days_str}|My ad text here|https://t.me/mychannel\nOr send a photo with that caption.")
+            return
+
+        # admin panel callbacks
+        if data == "admin_add_adplan":
+            bot.send_message(call.message.chat.id, "Use command:\n/addadplan DAYS=PRICE\nExample:\n/addadplan 3=4000")
+            return
+        if data == "admin_list_adplan":
+            load_ad_plans()
+            if not ad_plans:
+                bot.send_message(call.message.chat.id, "No ad plans set.")
+            else:
+                s = "Ad Plans (Days = Price):\n"
+                for d,p in ad_plans.items():
+                    s += f"- {d} days = {p} MMK\n"
+                bot.send_message(call.message.chat.id, s)
+            return
+        if data == "admin_del_adplan":
+            bot.send_message(call.message.chat.id, "Use command:\n/deladplan DAYS\nExample:\n/deladplan 3")
+            return
+
+        # admin addpoints helper
+        if data == "admin_add_points":
+            bot.send_message(call.message.chat.id, "Use command:\n/addpoints USERID AMOUNT\nExample:\n/addpoints 123456789 100")
+            return
+       # BUY VIP FROM USER
+        if data.startswith("buyvip:"):
+            vip_type = data.split(":")[1]
+            uid = call.from_user.id
+
+            pid = f"vip_{int(time.time())}"
+            pending[pid] = {
+                "type": "vip",
+                "user_id": uid,
+                "vip_type": vip_type,
+                "price": 3000 if vip_type == "normal" else 5000,
+                "username": call.from_user.username
+            }
+            save_pending()
+
+            # notify admin
+            for adm in ADMINS:
+                bot.send_message(
+                    adm,
+                    f"🔔 New VIP Request\n"
+                    f"User: @{call.from_user.username}\n"
+                    f"Type: {vip_type}\n"
+                    f"Price: {'3000' if vip_type=='normal' else '5000'} MMK"
+                )
+
+            bot.answer_callback_query(call.id, "✔ VIP request sent!")
+            bot.send_message(call.message.chat.id, "⏳ Your VIP request has been submitted to admin.")
+            return
+
+        # redeem flow (existing)
+        if data.startswith("redeem:"):
+            reward_name = data.split("redeem:")[1]
+            load_rewards_file()
+            if reward_name not in rewards:
+                return bot.answer_callback_query(call.id, "❌ Reward not found")
+            cost = rewards[reward_name]
+            uid = str(call.from_user.id)
+            ensure_user(call.from_user.id, call.from_user.username or "", call.from_user.first_name or "")
+            pts = users[uid].get("points", 0)
+            if pts < cost:
+                return bot.answer_callback_query(call.id, f"❌ Not enough points. Need {cost}, you have {pts}.")
+            pending_id = f"{int(time.time())}_{uid}"
+            pending[pending_id] = {
+                "type":"reward",
+                "user_id": uid,
+                "username": call.from_user.username or call.from_user.first_name or "",
+                "reward": reward_name,
+                "cost": cost,
+                "created": int(time.time())
+            }
+            save_pending()
+            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=f"📩 Request sent for {reward_name}. Waiting admin approval.")
+            buttons = admin_approve_buttons(pending_id)
+            for adm in ADMIN_IDS:
+                bot.send_message(adm, f"🔔 Redeem request from @{pending[pending_id]['username']}:\n🎁 {reward_name}\n💰 {cost} pts", reply_markup=buttons)
+            return
+
+        # admin approve/reject actions
+        if data.startswith("admin_approve:"):
+            pid = data.split("admin_approve:")[1]
+            return _admin_approve_pending(call, pid)
+        if data.startswith("admin_reject:"):
+            pid = data.split("admin_reject:")[1]
+            return _admin_reject_pending(call, pid)
+
+        # ads_cancel
+        if data == "ads_cancel":
+            bot.answer_callback_query(call.id, "Cancelled.")
+            return
+        if data == "ads_no_plans":
+            bot.answer_callback_query(call.id, "No ad plans yet.")
+            return
+
+        # admin other options (keep existing behaviors)
+        if data == "admin_add_reward":
+            bot.send_message(call.message.chat.id, "Use command: /addreward NAME=PRICE")
+            return
+        if data == "admin_edit_reward":
+            bot.send_message(call.message.chat.id, "Use command: /editreward NAME=PRICE")
+            return
+        if data == "admin_list_reward":
+            load_rewards_file()
+            if not rewards:
+                bot.send_message(call.message.chat.id, "No rewards.")
+            else:
+                s = "Rewards:\n"
+                for k,v in rewards.items():
+                    s += f"- {k} = {v} pts\n"
+                bot.send_message(call.message.chat.id, s)
+            return
+        if data == "admin_del_reward":
+            bot.send_message(call.message.chat.id, "Use command: /delreward NAME")
+        return
+        if data == "admin_add_spin":
+            bot.send_message(call.message.chat.id, "Use command: /addspin NAME=CHANCE (e.g. 🎁Gold=20)")
+            return
+        if data == "admin_edit_spin":
+            bot.send_message(call.message.chat.id, "Use command: /editspin NAME=CHANCE")
+            return
+        if data == "admin_list_spin":
+            load_spin_items()
+            if not spin_items:
+                bot.send_message(call.message.chat.id, "No spin items.")
+            else:
+                s = "Spin items:\n"
+                for it in spin_items:
+                    s += f"- {it['name']} ({it.get('chance',0)}%)\n"
+                bot.send_message(call.message.chat.id, s)
+            return
+        if data == "admin_del_spin":
+            bot.send_message(
+        call.message.chat.id,
+        "Use command: /delspin NAME"
+    )
+        return
+        if data == "admin_users_count":
+            bot.send_message(call.message.chat.id, f"Total users: {len(users)}")
+            return
+
+        bot.answer_callback_query(call.id, "Unhandled action")
+    except Exception:
+        traceback.print_exc()
+        try:
+            bot.answer_callback_query(call.id, "Error")
+        except:
+            pass
+
+# ---------------------------
+# Admin approve/reject pending logic (existing) - extended to handle ad approval
+# ---------------------------
+def _admin_approve_pending(call, pending_id):
+    load_pending()
+    pid = pending_id
+    if pid not in pending:
+        bot.answer_callback_query(call.id, "❌ Pending not found.")
+        return
+    entry = pending[pid]
+    if entry["type"] == "reward":
+        uid = entry["user_id"]
+        cost = entry["cost"]
+        if users.get(uid, {}).get("points", 0) < cost:
+            bot.send_message(call.message.chat.id, "❌ User doesn't have enough points now.")
+            return
+        users[uid]["points"] -= cost
+        save_json(USERS_FILE, users)
+        bot.send_message(call.message.chat.id, f"✅ Approved reward {entry['reward']} for user {uid}")
+        try:
+            bot.send_message(int(uid), f"✅ Your redeem for {entry['reward']} has been approved by admin.")
+        except Exception:
+            pass
+        del pending[pid]
+        save_pending()
+        return
+
+    if entry["type"] == "vip":
+        uid = entry["user_id"]
+        vip_type = entry["vip_type"]
+        price = entry["price"]
+        now = int(time.time())
+        until = now + 7*86400
+        users.setdefault(uid, {})
+        users[uid]["vip"] = {"type": vip_type, "until": until, "last_claim": None}
+        if vip_type == "special":
+            users[uid]["free_spins"] = users[uid].get("free_spins", 0) + 1
+        save_json(USERS_FILE, users)
+        bot.send_message(call.message.chat.id, f"✅ VIP {vip_type} approved for user {uid}")
+        try:
+            bot.send_message(int(uid), f" ✅ Your VIP ({vip_type}) has been approved. Enjoy!")
+        except Exception:
+            pass
+        del pending[pid]
+        save_pending()
+        return
+
+    if entry["type"] == "ad":
+        uid = entry["user_id"]
+        days = entry["days"]
+        ad_id = f"ad_{int(time.time())}"
+        until_ts = int(time.time()) + days*86400
+        ads[ad_id] = {
+            "user_id": uid,
+            "username": entry.get("username",""),
+            "text": entry.get("text",""),
+            "link": entry.get("link",""),
+            "photo": entry.get("photo", None),  # file_id if provided
+            "created": int(time.time()),
+            "until": until_ts,
+            "top": True
+        }
+        save_ads()
+        bot.send_message(call.message.chat.id, f"✅ Ad approved and posted: {ad_id}")
+        try:
+            bot.send_message(int(uid), "✅ Your ad post has been approved and is live.")
+        except Exception:
+            pass
+        del pending[pid]
+        save_pending()
+        return
+
+    bot.send_message(call.message.chat.id, "❌ Unknown pending type.")
+
+def _admin_reject_pending(call, pending_id):
+    load_pending()
+    pid = pending_id
+    if pid not in pending:
+        bot.answer_callback_query(call.id, "❌ Pending not found.")
+        return
+    entry = pending[pid]
+    uid = entry.get("user_id")
+    try:
+        if uid:
+            bot.send_message(int(uid), f"❌ Your request ({entry.get('type')}) was rejected by admin.")
+    except Exception:
+        pass
+    del pending[pid]
+    save_pending()
+    bot.send_message(call.message.chat.id, "Rejected and removed.")
+    return
+
+# ---------------------------
+# commands: spin admin add/edit/list (unchanged)
+# ---------------------------
+def cmd_addspin(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    try:
+        cmd = msg.text.split("/addspin",1)[1].strip()
+        if "=" not in cmd:
+            return bot.reply_to(msg, "Format: /addspin NAME=CHANCE")
+        name, chance = cmd.split("=",1)
+        name = name.strip()
+        chance = int(chance.strip())
+        load_spin_items()
+        spin_items.append({"name": name, "chance": chance})
+        save_spin_items()
+        bot.reply_to(msg, f"✔ Added spin item: {name} ({chance}%)")
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
+
+def cmd_editspin(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    try:
+        cmd = msg.text.split("/editspin",1)[1].strip()
+        if "=" not in cmd:
+            return bot.reply_to(msg, "Format: /editspin NAME=CHANCE")
+        name, chance = cmd.split("=",1)
+        name = name.strip()
+        chance = int(chance.strip())
+        load_spin_items()
+        found = False
+        for it in spin_items:
+            if it["name"].lower() == name.lower():
+                it["chance"] = chance
+                found = True
+        if not found:
+            return bot.reply_to(msg, "❌ Item not found")
+        save_spin_items()
+        bot.reply_to(msg, f"✔ Updated: {name} -> {chance}")
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
+
+def cmd_listspin(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    load_spin_items()
+    if not spin_items:
+        return bot.reply_to(msg, "No spin items.")
+    s = "🎡 Spin items:\n"
+    for it in spin_items:
+        s += f"- {it['name']} ({it.get('chance',0)}%)\n"
+    bot.reply_to(msg, s)
+
+def cmd_delspin(msg):
+    try:
+        parts = msg.text.split(maxsplit=1)
+        if len(parts) < 2:
+            bot.send_message(msg.chat.id, "Usage: /delspin NAME")
+            return
+
+        name = parts[1].strip()
+
+        load_spin_items()
+        global spin_items
+
+        before_count = len(spin_items)
+
+        spin_items = [i for i in spin_items if i['name'] != name]
+
+        save_spin_items()
+
+        if len(spin_items) < before_count:
+            bot.send_message(msg.chat.id, f"🗑 Deleted spin item: {name}")
+        else:
+            bot.send_message(msg.chat.id, f"❌ Spin item not found: {name}")
+
+    except Exception as e:
+        bot.send_message(msg.chat.id, f"Error: {e}")
+# ---------------------------
+# rewards admin commands (unchanged)
+# ---------------------------
+def cmd_addreward(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    try:
+        cmd = msg.text.split("/addreward",1)[1].strip()
+        if "=" not in cmd:
+            return bot.reply_to(msg, "Format: /addreward NAME=PRICE")
+        name, price = cmd.split("=",1)
+        name = name.strip()
+        price = int(price.strip())
+        load_rewards_file()
+        rewards[name] = price
+        save_rewards_file()
+        bot.reply_to(msg, f"✔ Added reward: {name} = {price} pts")
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
+
+def cmd_editreward(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    try:
+        cmd = msg.text.split("/editreward",1)[1].strip()
+        if "=" not in cmd:
+            return bot.reply_to(msg, "Format: /editreward NAME=PRICE")
+        name, price = cmd.split("=",1)
+        name = name.strip()
+        price = int(price.strip())
+        load_rewards_file()
+        if name not in rewards:
+            return bot.reply_to(msg, "❌ Reward not found")
+        rewards[name] = price
+        save_rewards_file()
+        bot.reply_to(msg, f"✔ Updated reward: {name} = {price} pts")
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
+
+def cmd_listreward(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    load_rewards_file()
+    if not rewards:
+        return bot.reply_to(msg, "No rewards.")
+    s = "🎁 Rewards:\n"
+    for k,v in rewards.items():
+        s += f"- {k} = {v} pts\n"
+    bot.reply_to(msg, s)
+
+def cmd_delreward(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+
+    try:
+        cmd = msg.text.split("/delreward", 1)[1].strip()
+        if cmd == "":
+            return bot.reply_to(msg, "Format: /delreward NAME")
+
+        name = cmd.strip()
+
+        load_rewards_file()
+        if name not in rewards:
+            return bot.reply_to(msg, "❌ Reward not found")
+
+        del rewards[name]
+        save_rewards_file()
+        bot.reply_to(msg, f"🗑 Deleted reward: {name}")
+
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
+# ---------------------------
+# submit ad command (enhanced)
+# Accepts either text command /submitad PRICE|DAYS|TEXT|LINK
+# or photo message whose caption begins with /submitad PRICE|DAYS|TEXT|LINK
+# ---------------------------
+def cmd_submitad(msg):
+    # handle photo messages with caption starting with /submitad
+    try:
+        body = None
+        photo_file_id = None
+        if msg.content_type == 'photo':
+            photo_file_id = msg.photo[-1].file_id
+            body = (msg.caption or "").replace("/submitad", "", 1).strip()
+        else:
+            parts = msg.text.split(" ",1)
+            if len(parts) < 2:
+                return bot.reply_to(msg, "Format: /submitad PRICE|DAYS|TEXT|LINK(optional)\nExample:\n/submitad 4000|3|Buy my service|https://t.me/mychan")
+            body = parts[1]
+
+        p = [x.strip() for x in body.split("|")]
+        if len(p) < 3:
+            return bot.reply_to(msg, "❌ Wrong format. Use:\n/submitad PRICE|DAYS|TEXT|LINK(optional)\nOr send a photo with that caption.")
+        price = int(p[0])
+        days = int(p[1])
+        text = p[2]
+        link = p[3] if len(p) > 3 else ""
+        uid = str(msg.from_user.id)
+        pending_id = f"ad_{int(time.time())}_{uid}"
+        pending[pending_id] = {
+            "type":"ad",
+            "user_id": uid,
+            "username": msg.from_user.username or msg.from_user.first_name or "",
+            "text": text,
+            "link": link,
+            "days": days,
+            "price": price,
+            "photo": photo_file_id,
+            "created": int(time.time())
+        }
+        save_pending()
+        # notify admin(s) with approve buttons
+        for adm in ADMIN_IDS:
+            try:
+                # build preview for admin (photo or text)
+                buttons = admin_approve_buttons(pending_id)
+                if photo_file_id:
+                    bot.send_photo(adm, photo_file_id, caption=f"🔔 New ad request from @{pending[pending_id]['username']}\nPrice: {price}\nDays: {days}\nText: {text}\nLink: {link}", reply_markup=buttons)
+                else:
+                    bot.send_message(adm, f"🔔 New ad request from @{pending[pending_id]['username']}\nPrice: {price}\nDays: {days}\nText: {text}\nLink: {link}", reply_markup=buttons)
+            except Exception:
+                pass
+        bot.reply_to(msg, "📩 Your Ad request was submitted. Waiting for admin approval.")
+    except Exception as e:
+        traceback.print_exc()
+        bot.reply_to(msg, f"❌ Error parsing: {e}")
+
+# ---------------------------
+# ad-plan admin commands (simple text commands)
+# ---------------------------
+def cmd_addadplan(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    try:
+        cmd = msg.text.split("/addadplan",1)[1].strip()
+        if "=" not in cmd:
+            return bot.reply_to(msg, "Format: /addadplan DAYS=PRICE")
+        days, price = cmd.split("=",1)
+        days = days.strip()
+        price = price.strip()
+        load_ad_plans()
+        ad_plans[days] = price
+        save_ad_plans()
+        bot.reply_to(msg, f"✔ Added ad plan: {days} days = {price} MMK")
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
+
+def cmd_listadplans(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    load_ad_plans()
+    if not ad_plans:
+        return bot.reply_to(msg, "No ad plans.")
+    s = "Ad Plans (Days = Price):\n"
+    for d,p in ad_plans.items():
+        s += f"- {d} days = {p} MMK\n"
+    bot.reply_to(msg, s)
+
+def cmd_deladplan(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    try:
+        cmd = msg.text.split("/deladplan",1)[1].strip()
+        days = cmd.strip()
+        load_ad_plans()
+        if days not in ad_plans:
+            return bot.reply_to(msg, "❌ Plan not found.")
+        del ad_plans[days]
+        save_ad_plans()
+        bot.reply_to(msg, f"✔ Removed ad plan: {days} days")
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
+
+# ---------------------------
+# /addpoints admin helper (unchanged)
+# ---------------------------
+def cmd_addpoints(msg):
+    if msg.from_user.id not in ADMIN_IDS:
+        return bot.reply_to(msg, "❌ Admin only")
+    try:
+        parts = msg.text.split()
+        if len(parts) != 3:
+            return bot.reply_to(msg, "Format: /addpoints USERID AMOUNT")
+        _, target_id, amount = parts
+        amount = int(amount)
+        ensure_user(target_id)
+        users[str(target_id)]["points"] = users.get(str(target_id), {}).get("points", 0) + amount
+        save_json(USERS_FILE, users)
+        bot.reply_to(msg, f"✅ Added {amount} points to {target_id}")
+        try:
+            bot.send_message(int(target_id), f"💰 You received {amount} points from admin.")
+        except Exception:
+            pass
+    except Exception as e:
+        bot.reply_to(msg, f"❌ Error: {e}")
+
+# ---------------------------
+# VIP daily grant helper (unchanged)
+# ---------------------------
+def _grant_vip_daily(uid):
+    u = users.get(uid)
+    if not u:
+        return
+    vip = u.get("vip")
+    if not vip or not vip.get("until"):
+        return
+    now = int(time.time())
+    until = int(vip["until"])
+    if now > until:
+        u["vip"] = None
+        save_json(USERS_FILE, users)
+        return
+    last = u.get("last_vip_claim")
+    last_ts = 0
+    if last:
+        try:
+            last_ts = int(last)
+        except:
+            last_ts = 0
+    days = (now - last_ts) // 86400 if last_ts else 1
+    if days <= 0:
+        return
+    rem_days = max(0, math.floor((until - now) / 86400) + 1)
+    give_days = min(days, rem_days)
+    if vip["type"] == "normal":
+        pts = 15 * give_days
+        users[uid]["points"] = users[uid].get("points", 0) + pts
+    else:
+        pts = 20 * give_days
+        users[uid]["points"] = users[uid].get("points", 0) + pts
+        users[uid]["free_spins"] = users[uid].get("free_spins", 0) + give_days
+    users[uid]["last_vip_claim"] = str(now)
+    save_json(USERS_FILE, users)
+
+# ---------------------------
+# start polling
+# ---------------------------
+if __name__ == "__main__":
+    print("Bot starting...")
+    bot.infinity_polling()

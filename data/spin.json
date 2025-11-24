@@ -1,0 +1,34 @@
+[
+  {
+    "name": "Sorry try again\ud83e\udd7a",
+    "chance": 30
+  },
+  {
+    "name": "You won \ud83d\udcb5500mmk",
+    "chance": 10
+  },
+  {
+    "name": "Wow\ud83e\udd73 you jackpot\ud83d\udcb51000mmk",
+    "chance": 7
+  },
+  {
+    "name": "Wow\ud83d\ude31  you won jackpot\ud83d\udcb52000mmk",
+    "chance": 5
+  },
+  {
+    "name": "Wow\ud83e\udd11 you bigwin \ud83d\udcb53000mmk",
+    "chance": 3
+  },
+  {
+    "name": "You get points:10",
+    "chance": 20
+  },
+  {
+    "name": "You get points:50",
+    "chance": 15
+  },
+  {
+    "name": "Wow\ud83e\udd29 you won points:100",
+    "chance": 10
+  }
+]
